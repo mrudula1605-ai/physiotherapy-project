@@ -14,7 +14,7 @@ st.set_page_config(page_title="AI Physiotherapy Trainer", layout="wide")
 st.markdown(
     """
     <h1 style="text-align:center; color:#1e3c72;">
-    🏋️ Smart Physiotherapy assistant using Computer Vision
+    🏋️ AI-Based Physiotherapy Exercise Trainer
     </h1>
     """,
     unsafe_allow_html=True
@@ -22,7 +22,6 @@ st.markdown(
 
 # ---------------- BEEP SOUND FUNCTION ----------------
 def beep():
-    # ✅ Works after 1 user click (Start Camera button is enough)
     components.html(
         """
         <script>
@@ -303,7 +302,6 @@ with b1:
         st.session_state.pause_start = None
         st.session_state.rep_count = 0
         st.session_state.rep_start_time = None
-
         st.session_state.beep_start_done = False
         st.session_state.last_beep_rep = 0
 
@@ -324,7 +322,129 @@ with b3:
         st.session_state.camera_on = False
         st.session_state.paused = False
 
-# ---------------- REPORT SECTION ----------------
+st.divider()
+
+# ---------------- CAMERA + INSTRUCTIONS ABOVE REPORT ----------------
+video_col, side_col = st.columns([3, 1])
+
+# WEBRTC PROCESSOR
+class VideoProcessor(VideoProcessorBase):
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+
+        # ✅ Do NOT mirror camera
+        # img = cv2.flip(img, 1)
+
+        h, w, _ = img.shape
+
+        cv2.rectangle(img, (0, 0), (w, int(h * 0.22)), (0, 0, 0), -1)
+        cv2.putText(img, f"Exercise: {selected_ex['name']}", (30, int(h * 0.07)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+        return frame.from_ndarray(img, format="bgr24")
+
+with video_col:
+    st.markdown("## 🎥 Camera")
+    webrtc_ctx = webrtc_streamer(
+        key="physio-cam",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+
+with side_col:
+    st.markdown("## 🧠 Instructions")
+    guidance_box = st.empty()
+
+    st.markdown("## 📊 Live Feedback")
+    feedback_box = st.empty()
+
+    st.markdown("## ✅ Progress")
+    progress_bar = st.progress(0)
+
+steps_text = ""
+for i, s in enumerate(selected_ex["steps"], start=1):
+    steps_text += f"{i}. {s}\n"
+
+guidance_box.markdown(
+    f"### ✅ {selected_ex['name']}\n\n"
+    f"**Duration/Target:** {selected_ex['duration']}\n\n"
+    f"**Steps:**\n{steps_text}\n"
+    f"✅ **Tip:** {selected_ex['tip']}"
+)
+
+# ---------------- TIMER + REPS LOGIC ----------------
+if not st.session_state.camera_on:
+    feedback_box.info("Select exercise and click **Start Camera** ✅")
+    progress_bar.progress(0)
+else:
+    now = time.time()
+    if st.session_state.paused and st.session_state.pause_start is not None:
+        effective_elapsed = int(
+            (st.session_state.pause_start - st.session_state.start_time)
+            - st.session_state.total_pause_time
+        )
+    else:
+        effective_elapsed = int(
+            (now - st.session_state.start_time)
+            - st.session_state.total_pause_time
+        )
+
+    if effective_elapsed < START_DELAY:
+        instruction = f"STARTING IN {START_DELAY - effective_elapsed}"
+        feedback_box.markdown("⏳ Get Ready...")
+        progress_bar.progress(st.session_state.rep_count / TARGET_REPS)
+
+    else:
+        if not st.session_state.beep_start_done:
+            beep()
+            st.session_state.beep_start_done = True
+
+        if st.session_state.rep_start_time is None:
+            st.session_state.rep_start_time = time.time()
+
+        rep_elapsed = int(time.time() - st.session_state.rep_start_time)
+        remaining = max(0, REP_HOLD_SECONDS - rep_elapsed)
+
+        if st.session_state.paused:
+            instruction = "⏸ PAUSED"
+            feedback_box.markdown("⏸ Session paused.")
+        else:
+            instruction = f"HOLD {remaining}s"
+
+            if rep_elapsed >= REP_HOLD_SECONDS:
+                st.session_state.rep_count += 1
+                st.session_state.rep_start_time = time.time()
+
+                if st.session_state.rep_count != st.session_state.last_beep_rep:
+                    beep()
+                    st.session_state.last_beep_rep = st.session_state.rep_count
+
+        feedback_box.markdown(
+            f"✅ Reps: **{st.session_state.rep_count}/{TARGET_REPS}**\n\n"
+            f"🕒 Session Time: **{effective_elapsed}s**"
+        )
+        progress_bar.progress(min(1.0, st.session_state.rep_count / TARGET_REPS))
+
+        if st.session_state.rep_count >= TARGET_REPS:
+            beep(); beep()
+            save_report(status="Completed")
+            st.success("🎉 Exercise Completed Successfully!")
+            st.session_state.camera_on = False
+
+    st.markdown(
+        f"""
+        <div style="padding:15px; background:#1e3c72; border-radius:12px; color:white; font-size:24px; font-weight:bold;">
+        ✅ LIVE INSTRUCTION: {instruction}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+st.divider()
+
+# ---------------- REPORT SECTION BELOW CAMERA ----------------
 st.markdown("## 📄 Exercise Session Report")
 
 if len(st.session_state.session_report) == 0:
@@ -340,135 +460,3 @@ else:
         file_name="physio_session_report.csv",
         mime="text/csv"
     )
-
-st.divider()
-
-# ---------------- SIDE PANEL (LIVE FEEDBACK) ----------------
-video_col, side_col = st.columns([3, 1])
-
-with side_col:
-    st.markdown("## 🧠 Instructions")
-    guidance_box = st.empty()
-
-    st.markdown("## 📊 Live Feedback")
-    feedback_box = st.empty()
-
-    st.markdown("## ✅ Progress")
-    progress_bar = st.progress(0)
-
-# ---------------- Instructions Content ----------------
-steps_text = ""
-for i, s in enumerate(selected_ex["steps"], start=1):
-    steps_text += f"{i}. {s}\n"
-
-guidance_box.markdown(
-    f"### ✅ {selected_ex['name']}\n\n"
-    f"**Duration/Target:** {selected_ex['duration']}\n\n"
-    f"**Steps:**\n{steps_text}\n"
-    f"✅ **Tip:** {selected_ex['tip']}"
-)
-
-# ---------------- WEBRTC CAMERA (WEBSITE FIX) ----------------
-class VideoProcessor(VideoProcessorBase):
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-
-        # ✅ Do NOT mirror camera on website
-        # (if you want mirrored, uncomment the next line)
-        # img = cv2.flip(img, 1)
-
-        # Overlay top bar
-        h, w, _ = img.shape
-        cv2.rectangle(img, (0, 0), (w, int(h * 0.22)), (0, 0, 0), -1)
-
-        # Show selected exercise
-        cv2.putText(img, f"Exercise: {selected_ex['name']}", (30, int(h * 0.07)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-        return frame.from_ndarray(img, format="bgr24")
-
-st.markdown("## 🎥 Camera (Works on Website ✅)")
-
-webrtc_ctx = webrtc_streamer(
-    key="physio-cam",
-    mode=WebRtcMode.SENDRECV,
-    video_processor_factory=VideoProcessor,
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-)
-
-# ---------------- TIMER + REPS LOGIC (Works with UI) ----------------
-if not st.session_state.camera_on:
-    st.info("Select exercise and click **Start Camera** ✅")
-    st.stop()
-
-# effective elapsed time
-now = time.time()
-if st.session_state.paused and st.session_state.pause_start is not None:
-    effective_elapsed = int(
-        (st.session_state.pause_start - st.session_state.start_time)
-        - st.session_state.total_pause_time
-    )
-else:
-    effective_elapsed = int(
-        (now - st.session_state.start_time)
-        - st.session_state.total_pause_time
-    )
-
-# Countdown + Rep logic
-if effective_elapsed < START_DELAY:
-    instruction = f"STARTING IN {START_DELAY - effective_elapsed}"
-    feedback_box.markdown("⏳ Get Ready...")
-    progress_bar.progress(st.session_state.rep_count / TARGET_REPS)
-
-else:
-    # Beep once after countdown ends
-    if not st.session_state.beep_start_done:
-        beep()
-        st.session_state.beep_start_done = True
-
-    if st.session_state.rep_start_time is None:
-        st.session_state.rep_start_time = time.time()
-
-    rep_elapsed = int(time.time() - st.session_state.rep_start_time)
-    remaining = max(0, REP_HOLD_SECONDS - rep_elapsed)
-
-    if st.session_state.paused:
-        instruction = "⏸ PAUSED"
-        feedback_box.markdown("⏸ Session paused.")
-    else:
-        instruction = f"{selected_ex['name']} | HOLD {remaining}s"
-
-        if rep_elapsed >= REP_HOLD_SECONDS:
-            st.session_state.rep_count += 1
-            st.session_state.rep_start_time = time.time()
-
-            # beep each rep completion
-            if st.session_state.rep_count != st.session_state.last_beep_rep:
-                beep()
-                st.session_state.last_beep_rep = st.session_state.rep_count
-
-    feedback_box.markdown(
-        f"✅ Reps: **{st.session_state.rep_count}/{TARGET_REPS}**\n\n"
-        f"🕒 Session Time: **{effective_elapsed}s**"
-    )
-    progress_bar.progress(min(1.0, st.session_state.rep_count / TARGET_REPS))
-
-    # Completion
-    if st.session_state.rep_count >= TARGET_REPS:
-        beep()
-        beep()
-        save_report(status="Completed")
-        st.success("🎉 Exercise Completed Successfully!")
-        st.session_state.camera_on = False
-        st.stop()
-
-# Show current instruction text (big)
-st.markdown(
-    f"""
-    <div style="padding:15px; background:#1e3c72; border-radius:12px; color:white; font-size:24px; font-weight:bold;">
-    ✅ LIVE INSTRUCTION: {instruction}
-    </div>
-    """,
-    unsafe_allow_html=True
-)
