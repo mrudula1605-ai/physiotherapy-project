@@ -6,6 +6,7 @@ import cv2
 import streamlit.components.v1 as components
 
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+from streamlit_autorefresh import st_autorefresh
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="AI Physiotherapy Trainer", layout="wide")
@@ -45,30 +46,23 @@ TARGET_REPS = 5
 REP_HOLD_SECONDS = 15
 
 # ---------------- SESSION STATE ----------------
-if "camera_on" not in st.session_state:
-    st.session_state.camera_on = False
-if "paused" not in st.session_state:
-    st.session_state.paused = False
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-if "pause_start" not in st.session_state:
-    st.session_state.pause_start = None
-if "total_pause_time" not in st.session_state:
-    st.session_state.total_pause_time = 0
-if "rep_count" not in st.session_state:
-    st.session_state.rep_count = 0
-if "rep_start_time" not in st.session_state:
-    st.session_state.rep_start_time = None
-
-# ✅ REPORT STORAGE
-if "session_report" not in st.session_state:
-    st.session_state.session_report = []
-
-# ✅ BEEP CONTROL
-if "beep_start_done" not in st.session_state:
-    st.session_state.beep_start_done = False
-if "last_beep_rep" not in st.session_state:
-    st.session_state.last_beep_rep = 0
+defaults = {
+    "camera_on": False,
+    "paused": False,
+    "start_time": None,
+    "pause_start": None,
+    "total_pause_time": 0.0,
+    "rep_count": 0,
+    "rep_start_time": None,
+    "rep_elapsed_frozen": 0,
+    "frozen_elapsed": 0,
+    "session_report": [],
+    "beep_start_done": False,
+    "last_beep_rep": 0,
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ---------------- DIET PLAN ----------------
 DIET_PLAN = {
@@ -234,6 +228,10 @@ EXERCISES = {
     }
 }
 
+# ✅ Auto refresh only while session is ON (makes countdown + timers smooth)
+if st.session_state.camera_on:
+    st_autorefresh(interval=500, key="physio_refresh")
+
 # ---------------- UI: USER DETAILS ----------------
 st.markdown("## 👤 User Details")
 colA, colB, colC, colD = st.columns(4)
@@ -297,23 +295,46 @@ with b1:
         st.session_state.camera_on = True
         st.session_state.paused = False
         st.session_state.start_time = time.time()
-        st.session_state.total_pause_time = 0
+        st.session_state.total_pause_time = 0.0
         st.session_state.pause_start = None
         st.session_state.rep_count = 0
         st.session_state.rep_start_time = None
+        st.session_state.rep_elapsed_frozen = 0
+        st.session_state.frozen_elapsed = 0
         st.session_state.beep_start_done = False
         st.session_state.last_beep_rep = 0
 
 with b2:
     if st.button("⏸ Pause / Resume", use_container_width=True):
         if st.session_state.camera_on:
-            st.session_state.paused = not st.session_state.paused
-            if st.session_state.paused:
+            if not st.session_state.paused:
+                # ✅ Pausing now
+                st.session_state.paused = True
+
+                # Freeze total elapsed
+                st.session_state.frozen_elapsed = int(
+                    time.time() - st.session_state.start_time - st.session_state.total_pause_time
+                )
+
+                # Freeze rep elapsed
+                if st.session_state.rep_start_time is not None:
+                    st.session_state.rep_elapsed_frozen = int(time.time() - st.session_state.rep_start_time)
+                else:
+                    st.session_state.rep_elapsed_frozen = 0
+
                 st.session_state.pause_start = time.time()
+
             else:
+                # ✅ Resuming now
+                st.session_state.paused = False
+
                 if st.session_state.pause_start is not None:
                     st.session_state.total_pause_time += (time.time() - st.session_state.pause_start)
                     st.session_state.pause_start = None
+
+                # Adjust rep_start_time so rep timer resumes correctly
+                if st.session_state.rep_start_time is not None:
+                    st.session_state.rep_start_time = time.time() - st.session_state.rep_elapsed_frozen
 
 with b3:
     if st.button("⛔ Stop", use_container_width=True):
@@ -326,15 +347,14 @@ st.divider()
 # ---------------- CAMERA + INSTRUCTIONS ABOVE REPORT ----------------
 video_col, side_col = st.columns([3, 1])
 
-# ✅ FAST + NOT MIRRORED WEBCAM PROCESSOR
 class VideoProcessor(VideoProcessorBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
 
-        # ✅ FIX MIRROR: Force un-mirror output
+        # ✅ FIX MIRROR (force correct view)
         img = cv2.flip(img, 1)
 
-        # ✅ SPEED FIX: DO NOT draw heavy overlays here (keeps camera smooth)
+        # ✅ No heavy drawing for speed
         return frame.from_ndarray(img, format="bgr24")
 
 with video_col:
@@ -344,14 +364,10 @@ with video_col:
         key="physio-cam",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=VideoProcessor,
-
-        # ✅ SPEED SETTINGS
         media_stream_constraints={
             "video": {"width": 640, "height": 480, "frameRate": 15},
             "audio": False
         },
-
-        # ✅ Faster for your system
         async_processing=False,
     )
 
@@ -377,24 +393,22 @@ guidance_box.markdown(
 )
 
 # ---------------- TIMER + REPS LOGIC ----------------
+instruction = "Select exercise and click Start ✅"
+
 if not st.session_state.camera_on:
     feedback_box.info("Select exercise and click **Start Camera** ✅")
     progress_bar.progress(0)
-else:
-    now = time.time()
-    if st.session_state.paused and st.session_state.pause_start is not None:
-        effective_elapsed = int(
-            (st.session_state.pause_start - st.session_state.start_time)
-            - st.session_state.total_pause_time
-        )
-    else:
-        effective_elapsed = int(
-            (now - st.session_state.start_time)
-            - st.session_state.total_pause_time
-        )
 
-    if effective_elapsed < START_DELAY:
-        instruction = f"STARTING IN {START_DELAY - effective_elapsed}"
+else:
+    if st.session_state.paused:
+        effective_elapsed = st.session_state.frozen_elapsed
+    else:
+        effective_elapsed = int(time.time() - st.session_state.start_time - st.session_state.total_pause_time)
+
+    remaining_start = max(0, START_DELAY - effective_elapsed)
+
+    if remaining_start > 0:
+        instruction = f"STARTING IN {remaining_start}"
         feedback_box.markdown("⏳ Get Ready...")
         progress_bar.progress(st.session_state.rep_count / TARGET_REPS)
 
@@ -406,14 +420,18 @@ else:
         if st.session_state.rep_start_time is None:
             st.session_state.rep_start_time = time.time()
 
-        rep_elapsed = int(time.time() - st.session_state.rep_start_time)
-        remaining = max(0, REP_HOLD_SECONDS - rep_elapsed)
+        if st.session_state.paused:
+            rep_elapsed = st.session_state.rep_elapsed_frozen
+        else:
+            rep_elapsed = int(time.time() - st.session_state.rep_start_time)
+
+        remaining_rep = max(0, REP_HOLD_SECONDS - rep_elapsed)
 
         if st.session_state.paused:
             instruction = "⏸ PAUSED"
             feedback_box.markdown("⏸ Session paused.")
         else:
-            instruction = f"HOLD {remaining}s"
+            instruction = f"HOLD {remaining_rep}s"
 
             if rep_elapsed >= REP_HOLD_SECONDS:
                 st.session_state.rep_count += 1
@@ -430,7 +448,8 @@ else:
         progress_bar.progress(min(1.0, st.session_state.rep_count / TARGET_REPS))
 
         if st.session_state.rep_count >= TARGET_REPS:
-            beep(); beep()
+            beep()
+            beep()
             save_report(status="Completed")
             st.success("🎉 Exercise Completed Successfully!")
             st.session_state.camera_on = False
