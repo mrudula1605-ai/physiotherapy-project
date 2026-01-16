@@ -2,7 +2,6 @@ import streamlit as st
 import time
 import pandas as pd
 from datetime import datetime
-import numpy as np
 import cv2
 import streamlit.components.v1 as components
 
@@ -327,30 +326,33 @@ st.divider()
 # ---------------- CAMERA + INSTRUCTIONS ABOVE REPORT ----------------
 video_col, side_col = st.columns([3, 1])
 
-# WEBRTC PROCESSOR
+# ✅ FAST + NOT MIRRORED WEBCAM PROCESSOR
 class VideoProcessor(VideoProcessorBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
 
-        # ✅ Do NOT mirror camera
-        # img = cv2.flip(img, 1)
+        # ✅ FIX MIRROR: Force un-mirror output
+        img = cv2.flip(img, 1)
 
-        h, w, _ = img.shape
-
-        cv2.rectangle(img, (0, 0), (w, int(h * 0.22)), (0, 0, 0), -1)
-        cv2.putText(img, f"Exercise: {selected_ex['name']}", (30, int(h * 0.07)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
+        # ✅ SPEED FIX: DO NOT draw heavy overlays here (keeps camera smooth)
         return frame.from_ndarray(img, format="bgr24")
 
 with video_col:
     st.markdown("## 🎥 Camera")
+
     webrtc_ctx = webrtc_streamer(
         key="physio-cam",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=VideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
+
+        # ✅ SPEED SETTINGS
+        media_stream_constraints={
+            "video": {"width": 640, "height": 480, "frameRate": 15},
+            "audio": False
+        },
+
+        # ✅ Faster for your system
+        async_processing=False,
     )
 
 with side_col:
